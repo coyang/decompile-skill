@@ -30,24 +30,49 @@ evals/                      verification regression suite + fixture corpus
 
 ## Requirements
 
-- binutils (`file`, `readelf`, `objdump`, `nm`)
-- GCC family (or Clang) for rebuild checks
-- Ghidra + JDK 17+ for decompiler evidence (reports can run without it)
-- bubblewrap (`bwrap`) for the isolated differential sampler
+The skill is a skill for Claude Code (or compatible agent); no package install is
+required. The scripts drive standard system tools, so the toolchain must be
+present:
 
-## Quick start
+| Tool | Needed for | Notes |
+|------|-----------|-------|
+| `bash` | all scripts | |
+| Python 3.8+ (`python3`) | triage, differential sampler, verifier | stdlib only, no third-party packages |
+| `file`, `readelf`, `objdump`, `nm` | triage / ground truth | binutils |
+| `gcc` (or `cc`/`clang`) | rebuild checks, acceptance build | |
+| `ar` | archive (`*.a`) handling, evals | binutils |
+| `timeout` | bounded external commands | coreutils |
+| Ghidra `analyzeHeadless` + JDK 17+ | decompiler evidence (deep mode) | optional for quick reports; install from ghidra.org |
+| `bwrap` (bubblewrap) | isolated differential sampler, verifier sandbox | optional but required for `accept`/sampling |
+
+`SKILL_DIR` is the directory containing `SKILL.md`. The scripts never install
+anything themselves.
+
+Example install (Debian/Ubuntu):
 
 ```bash
-# source report for a small named scope
-bash "$SKILL_DIR/scripts/triage.sh" target.so --out /tmp/work
+sudo apt install binutils gcc python3 coreutils bubblewrap
+```
 
-# deep reconstruction
-bash "$SKILL_DIR/scripts/ghidra-decompile.sh" target.so --workdir /tmp/work
+### Feature matrix
 
-# acceptance verification of a rebuilt library
+| Tool set | quick report | deep reconstruction | differential sampling | acceptance (`accept`) |
+|----------|-------------|--------------------|----------------------|------------------------|
+| bash + binutils + python3 | yes | yes | no | no |
+| + gcc + bubblewrap | yes | yes | yes | yes |
+| + Ghidra/JDK | yes (disassembly only without) | full | yes | yes |
+
+### Running the skill
+
+In Claude Code, invoke it by name. From a shell, the entrypoints are:
+
+```bash
+SKILL_DIR=/path/to/decompile
+bash "$SKILL_DIR/scripts/triage.sh" target.so --out /tmp/work     # quick: probe + report
+bash "$SKILL_DIR/scripts/ghidra-decompile.sh" target.so --workdir /tmp/work  # deep: decompiler evidence
 python3 "$SKILL_DIR/scripts/verify.py" ORIGINAL.so TREE \
   --candidate librebuilt.so --policy OWNER_POLICY.json \
-  --policy-sha256 TRUSTED_SHA256 --json out/acceptance.json
+  --policy-sha256 TRUSTED_SHA256 --json out/acceptance.json       # accept: verified replacement
 ```
 
 ## Tests
