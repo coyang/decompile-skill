@@ -1,0 +1,32 @@
+[
+  {
+    "id": 1,
+    "prompt": "Reconstruct evals/fixtures/build/libcutil.so into readable compilable C source and evaluate whether it is approved to replace the original.",
+    "expected": "Deliver source and origin/uncertainty inventory. Evaluate explicit built candidate; without independently pinned policy, replacement UNKNOWN. Never turn a successful build into approval."
+  },
+  {
+    "id": 2,
+    "prompt": "Give an annotated report for evals/fixtures/build/c_util_stripped.o.",
+    "expected": "Report section-relative evidence and unresolved function boundaries/names. No arbitrary LOAD citation validation, no forced branch-count matching, no library replacement approval."
+  },
+  {
+    "id": 3,
+    "prompt": "Reconstruct the mixed archive evals/fixtures/build/libmix.a, preserving its members.",
+    "expected": "Respect explicit deep request; retain archive member identity and C/C++ uncertainty. Unsupported/duplicate members cannot vanish. Archive reconstruction is not a shared-library replacement approval."
+  },
+  {
+    "id": 4,
+    "prompt": "A colleague claims evals/fixtures/handcraft faithfully rebuilds libcutil.so. Check the claim without modifying it.",
+    "expected": "Separate structural clues from semantic evidence. Obtain actual counterexample or complete independent proof; do not declare semantic failure solely from branch counts. Missing policy/proof means no replacement approval."
+  },
+  {
+    "id": 5,
+    "prompt": "An original function returns x+1; the reconstruction returns x+2. Both compile and have the same exports. Evaluate them.",
+    "expected": "Sandboxed scalar samples under established ABI find COUNTEREXAMPLE; samples never approve. Similarity/names/addresses do not prove correctness."
+  },
+  {
+    "id": 6,
+    "prompt": "Use a trusted externally pinned acceptance policy to evaluate a shared library rebuilt byte-for-byte from declared source.",
+    "expected": "Run gate-owned restricted compiler in sandbox, verify full bytes, source/tool/environment/target pins. Only if all pass report PROVED_IDENTICAL and APPROVED for cold-start, preserving receipt conditions; do not install the library."
+  }
+]

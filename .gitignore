@@ -1,0 +1,4 @@
+# Built fixture binaries carry DWARF-embedded absolute paths (see evals/README.md)
+evals/fixtures/build/
+**/__pycache__/
+*.pyc

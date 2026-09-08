@@ -1,0 +1,2 @@
+timestamp	eval	config	iteration	gates	exit_code	u_density	note
+2026-09-02T08:30	2	with_skill	2	V7=PASS,branch-xcheck=PASS,scorecard=n/a	0	8/10	post-darwin-pass2r1 banner-reachability fix verified live: both banner literals + tier string verbatim, zero (G), objdump shortcut, no STOP-1 needed
