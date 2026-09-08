@@ -42,12 +42,17 @@ class GhidraDriverTest(unittest.TestCase):
             project_dir="$1"; project_name="$2"; shift 2
             mkdir -p "$project_dir"
             touch "$project_dir/$project_name.gpr"
+            mkdir -p "$project_dir/$project_name.rep"
             printf '%s\\n' "$*" >> "${FAKE_CALL_LOG:?}"
             program_dir="$GHIDRA_OUTPUT_DIR/70726f6772616d2e6f"
             mkdir -p "$program_dir"
-            cat > "$program_dir/export-status.json" <<'JSON'
-            {"complete":true,"requested":[],"matched":[],"unmatched":[],"failed":[],"dumped":1,"program":"program.o"}
+            if [[ -n "${FAKE_STATUS_FILE:-}" ]]; then
+              cp "$FAKE_STATUS_FILE" "$program_dir/export-status.json"
+            else
+              cat > "$program_dir/export-status.json" <<'JSON'
+            {"complete":true,"requested":[],"matched":[],"unmatched":[],"failed":[],"dumped":1,"program":"input.o"}
             JSON
+            fi
             exit "${FAKE_EXIT_CODE:-0}"
         """), encoding="utf-8")
         fake.chmod(0o755)
@@ -98,8 +103,19 @@ class GhidraDriverTest(unittest.TestCase):
         self.assertEqual(retried.returncode, 0, retried.stderr)
         self.assertIn("IMPORT mode", retried.stdout)
         self.assertNotIn("REPROCESS mode", retried.stdout)
-        failed_manifest = json.loads(self.manifests()[0].read_text(encoding="utf-8"))
-        self.assertEqual(failed_manifest["status"], "headless-failed")
+        states = [json.loads(path.read_text(encoding="utf-8"))["status"]
+                  for path in self.manifests()]
+        self.assertIn("headless-failed", states)
+
+    def test_modified_project_is_not_reused(self):
+        first = self.run_driver()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        project = next((self.work / "ghproj").glob("*.gpr"))
+        project.write_bytes(b"externally modified project")
+        second = self.run_driver()
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertIn("IMPORT mode", second.stdout)
+        self.assertNotIn("REPROCESS mode", second.stdout)
 
     def test_tool_script_change_invalidates_project_reuse(self):
         first = self.run_driver()
@@ -119,6 +135,30 @@ class GhidraDriverTest(unittest.TestCase):
         self.assertEqual(empty.returncode, 2)
         self.assertFalse(self.log.exists())
 
+    def test_unmatched_target_and_malformed_status_fail_closed(self):
+        targets = self.root / "targets.txt"
+        targets.write_text("wanted_function\n", encoding="utf-8")
+        unmatched_status = self.root / "unmatched.json"
+        unmatched_status.write_text(json.dumps({
+            "complete": True, "requested": ["wanted_function"], "matched": [],
+            "unmatched": ["wanted_function"], "failed": [], "dumped": 0,
+            "program": "input.o",
+        }), encoding="utf-8")
+        unmatched = self.run_driver(
+            "--targets", str(targets), env=self.env | {"FAKE_STATUS_FILE": str(unmatched_status)}
+        )
+        self.assertNotEqual(unmatched.returncode, 0)
+        self.assertIn("were not found", unmatched.stderr)
+
+        malformed_status = self.root / "malformed.json"
+        malformed_status.write_text(json.dumps({
+            "complete": "yes", "requested": [], "matched": [], "unmatched": [],
+            "failed": [], "dumped": 1, "program": "input.o",
+        }), encoding="utf-8")
+        malformed = self.run_driver(env=self.env | {"FAKE_STATUS_FILE": str(malformed_status)})
+        self.assertNotEqual(malformed.returncode, 0)
+        self.assertIn("invalid export status", malformed.stderr)
+
     @unittest.skipUnless(shutil.which("ar") and shutil.which("cc"), "binutils/compiler required")
     def test_duplicate_archive_member_names_are_rejected_without_extraction(self):
         one = self.root / "one"
@@ -134,6 +174,22 @@ class GhidraDriverTest(unittest.TestCase):
         result = self.run_driver()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("duplicate archive member", result.stderr)
+        self.assertFalse(self.log.exists())
+
+    @unittest.skipUnless(shutil.which("ar") and shutil.which("cc"), "binutils/compiler required")
+    def test_archive_member_evidence_path_collision_is_rejected(self):
+        source = self.root / "unit.c"
+        source.write_text("int unit(void){return 1;}\n", encoding="utf-8")
+        first = self.root / "a+b.o"
+        second = self.root / "a_b.o"
+        subprocess.run(["cc", "-c", source, "-o", first], check=True)
+        shutil.copy2(first, second)
+        archive = self.root / "collision.a"
+        subprocess.run(["ar", "qc", archive, first, second], check=True)
+        self.artifact = archive
+        result = self.run_driver()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("collide after evidence-path sanitization", result.stderr)
         self.assertFalse(self.log.exists())
 
 

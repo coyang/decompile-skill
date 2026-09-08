@@ -46,6 +46,19 @@ and location; escaped C syntax is not a literal byte search. Strings built at ru
 may be justified by instruction/dataflow evidence even when not contiguous in the
 binary. Never skip format strings, paths or short strings merely to get a clean score.
 
+The bundled driver writes each export to `ghidra/runs/<run-id>/`. Its
+`run-manifest.json` records the analysis fingerprint, target coverage, program
+statuses and file SHA-256 hashes. Failed runs retain their partial evidence and a
+non-complete status. Select one explicit run when consuming an inventory; never
+combine old function files with a newer subset's inventory implicitly.
+
+Each program's `export-status.json` separates requested/matched/unmatched targets
+from failed decompilations. A target may match only one program in an archive;
+the driver checks coverage across the selected programs. A completed export means
+the selected tool operations completed, not that Ghidra discovered every machine
+function or that recovered semantics are correct. The JSON function inventory
+also records `decompile_status` per exported function.
+
 ## Deliverables
 
 `PROVENANCE.md` records artifact/source hashes and tool/settings history. `NOTES.md`

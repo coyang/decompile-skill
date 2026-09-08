@@ -24,6 +24,29 @@ def write_json(path, value):
     temporary.replace(path)
 
 
+def project_sha256(project_dir, project_name):
+    """Hash all persistent files belonging to one closed Ghidra project."""
+    project_dir = Path(project_dir)
+    roots = [project_dir / (project_name + ".gpr"), project_dir / (project_name + ".rep")]
+    if not roots[0].is_file() or not roots[1].is_dir():
+        raise FileNotFoundError("project requires both .gpr and .rep")
+    files = []
+    for root in roots:
+        if root.is_file():
+            files.append(root)
+        elif root.is_dir():
+            files.extend(path for path in root.rglob("*") if path.is_file() and not path.is_symlink())
+    if not files:
+        raise FileNotFoundError("project has no persistent files")
+    digest = hashlib.sha256()
+    for path in sorted(files, key=lambda item: str(item.relative_to(project_dir))):
+        relative = str(path.relative_to(project_dir)).encode("utf-8")
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(bytes.fromhex(sha256(path)))
+    return digest.hexdigest()
+
+
 def ghidra_version(headless):
     for parent in headless.parents:
         properties = parent / "Ghidra" / "application.properties"
@@ -73,8 +96,9 @@ def select_project(args):
         try:
             value = json.loads(marker.read_text(encoding="utf-8"))
             name = value["projectName"]
+            actual_project_hash = project_sha256(project_dir, name)
             if (value.get("status") == "complete" and value.get("fingerprint") == wanted
-                    and (project_dir / (name + ".gpr")).is_file()):
+                    and value.get("projectSha256") == actual_project_hash):
                 print(name)
                 return
         except (OSError, ValueError, KeyError, TypeError):
@@ -102,15 +126,35 @@ def finalize(args):
     for path in status_paths:
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
-            for field in ("complete", "requested", "matched", "unmatched", "failed"):
+            for field in ("complete", "requested", "matched", "unmatched", "failed",
+                          "dumped", "program"):
                 if field not in value:
                     raise ValueError("missing field " + field)
+            if type(value["complete"]) is not bool:
+                raise TypeError("complete must be a boolean")
+            for field in ("requested", "matched", "unmatched", "failed"):
+                if (not isinstance(value[field], list)
+                        or any(not isinstance(item, str) for item in value[field])):
+                    raise TypeError(field + " must be an array of strings")
+            if (type(value["dumped"]) is not int or value["dumped"] < 0
+                    or not isinstance(value["program"], str) or not value["program"]):
+                raise TypeError("invalid dumped or program field")
+            program_requested = set(value["requested"])
+            program_matched = set(value["matched"])
+            if program_matched - program_requested:
+                raise ValueError("matched contains a target that was not requested")
+            if set(value["unmatched"]) != program_requested - program_matched:
+                raise ValueError("unmatched is inconsistent with requested and matched")
+            if value["complete"] and value["failed"]:
+                raise ValueError("complete export contains failed functions")
             statuses.append(value)
         except (OSError, ValueError, TypeError) as error:
             invalid_status = f"{path.relative_to(run_dir)}: {error}"
             break
 
     expected = set(read_targets(args.targets))
+    expected_programs = set(read_targets(args.expected_programs))
+    actual_programs = [value["program"] for value in statuses]
     requested = {item for value in statuses for item in value.get("requested", [])}
     matched = {item for value in statuses for item in value.get("matched", [])}
     failed = [item for value in statuses for item in value.get("failed", [])]
@@ -128,6 +172,12 @@ def finalize(args):
     elif any(not value.get("complete") for value in statuses) or failed:
         state = "export-incomplete"
         reason = "one or more program exports failed or were cancelled"
+    elif (len(actual_programs) != len(set(actual_programs))
+          or set(actual_programs) != expected_programs):
+        state = "export-incomplete"
+        reason = ("program export inventory mismatch; expected "
+                  + ", ".join(sorted(expected_programs)) + "; got "
+                  + ", ".join(sorted(actual_programs)))
     elif expected and requested != expected:
         state = "export-incomplete"
         reason = "export status did not record the exact requested target set"
@@ -147,6 +197,18 @@ def finalize(args):
             "size": path.stat().st_size,
             "sha256": sha256(path),
         })
+    project_hash = None
+    if state == "complete" and args.analysis_marker:
+        if not args.project_dir:
+            state = "export-incomplete"
+            reason = "project directory is required for an analysis marker"
+        else:
+            try:
+                project_hash = project_sha256(args.project_dir, args.project_name)
+            except OSError as error:
+                state = "export-incomplete"
+                reason = f"could not hash completed project: {error}"
+
     manifest = {
         "schema": 1,
         "status": state,
@@ -160,6 +222,10 @@ def finalize(args):
             "matched": sorted(matched),
             "unmatched": unmatched,
         },
+        "programs": {
+            "expected": sorted(expected_programs),
+            "exported": sorted(actual_programs),
+        },
         "programStatuses": statuses,
         "files": files,
     }
@@ -171,6 +237,7 @@ def finalize(args):
             "status": "complete",
             "completedAt": manifest["createdAt"],
             "projectName": args.project_name,
+            "projectSha256": project_hash,
             "fingerprint": fingerprint_value,
         })
     if state != "complete":
@@ -201,7 +268,9 @@ def parser():
     finish.add_argument("--project-name", required=True)
     finish.add_argument("--headless-rc", type=int, required=True)
     finish.add_argument("--targets")
+    finish.add_argument("--expected-programs", required=True)
     finish.add_argument("--analysis-marker")
+    finish.add_argument("--project-dir")
     return top
 
 

@@ -27,6 +27,14 @@ and exercises width preservation, pointer-to-array declarations, by-value orderi
 and unsupported layout rejection. It skips explicitly when Ghidra JARs are absent.
 A skipped test is a validation gap, not a passing runtime integration.
 
+`test_triage.py` exercises real ELF/archive inputs, including duplicate member
+rejection, member order, uncertain language/counts and JSON encoding.
+`test_function_export.py` compiles the function exporter against Ghidra and checks
+explicit target selection, unresolved targets and rejection of evidence overwrite.
+`test_ghidra_driver.py` uses a controlled headless executable to exercise cache
+invalidation, failed runs and separate hashed evidence batches. These driver tests
+validate orchestration; a real Ghidra import/reprocess smoke test remains distinct.
+
 The acceptance contract is in ../references/acceptance.md. External certificate
 checkers are not supplied by the fixture corpus. Protocol tests must not use a
 checker that always returns PASS as evidence of semantic correctness. Missing,

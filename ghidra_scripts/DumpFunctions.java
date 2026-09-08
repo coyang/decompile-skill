@@ -9,7 +9,7 @@
 
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
-import ghidra.app.script.GhidraScript;
+import ghidra.app.util.headless.HeadlessScript;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionIterator;
 import ghidra.program.model.listing.Instruction;
@@ -26,7 +26,7 @@ import java.io.PrintWriter;
 import java.util.LinkedHashSet;
 import java.util.Set;
 
-public class DumpFunctions extends GhidraScript {
+public class DumpFunctions extends HeadlessScript {
 
     // An explicit selection must never silently become an unrestricted dump.
     static class Targets {
@@ -117,101 +117,102 @@ public class DumpFunctions extends GhidraScript {
 
         DecompInterface decomp = new DecompInterface();
         try {
-        if (!decomp.openProgram(currentProgram)) throw new IOException("Cannot initialize decompiler");
+            if (!decomp.openProgram(currentProgram)) throw new IOException("Cannot initialize decompiler");
 
-        File listFile = new File(dir, "fnlist.txt");
-        try (PrintWriter list = newEvidenceWriter(listFile);
-             PrintWriter fns = newEvidenceWriter(new File(dir, program + "_functions.json"));
-             PrintWriter calls = newEvidenceWriter(new File(dir, program + "_calls.json"))) {
-        fns.println("{\"program\":\"" + esc(currentProgram.getName())
-            + "\",\"language\":\"" + esc(currentProgram.getLanguage().getLanguageID().toString())
-            + "\",\"functions\":[");
-        calls.println("{\"program\":\"" + esc(currentProgram.getName()) + "\",\"edges\":[");
+            File listFile = new File(dir, "fnlist.txt");
+            try (PrintWriter list = newEvidenceWriter(listFile);
+                 PrintWriter fns = newEvidenceWriter(new File(dir, program + "_functions.json"));
+                 PrintWriter calls = newEvidenceWriter(new File(dir, program + "_calls.json"))) {
+                fns.println("{\"program\":\"" + esc(currentProgram.getName())
+                    + "\",\"language\":\"" + esc(currentProgram.getLanguage().getLanguageID().toString())
+                    + "\",\"functions\":[");
+                calls.println("{\"program\":\"" + esc(currentProgram.getName()) + "\",\"edges\":[");
 
-        FunctionIterator it = currentProgram.getFunctionManager().getFunctions(true);
-        boolean firstFn = true, firstEdge = true;
-        int dumped = 0;
+                FunctionIterator it = currentProgram.getFunctionManager().getFunctions(true);
+                boolean firstFn = true, firstEdge = true;
+                int dumped = 0;
 
-        while (it.hasNext() && !monitor.isCancelled()) {
-            Function f = it.next();
-            if (f.isExternal()) continue;
-            String hex = plainAddr(f);
-            if (!targets.matches(f.getName(), hex)) continue;
-            DecompileResults res = decomp.decompileFunction(f, 60, monitor);
-            boolean recovered = res != null && res.decompileCompleted() && res.getDecompiledFunction() != null;
-            if (!recovered) failed.add(hex);
-            String fname = sanitize(f.getName());
+                while (it.hasNext() && !monitor.isCancelled()) {
+                    Function f = it.next();
+                    if (f.isExternal()) continue;
+                    String hex = plainAddr(f);
+                    if (!targets.matches(f.getName(), hex)) continue;
+                    DecompileResults res = decomp.decompileFunction(f, 60, monitor);
+                    boolean recovered = res != null && res.decompileCompleted() && res.getDecompiledFunction() != null;
+                    if (!recovered) failed.add(hex);
+                    String fname = sanitize(f.getName());
 
-            // ---- functions.json entry
-            if (!firstFn) fns.println(",");
-            firstFn = false;
-            fns.println("  {\"name\":\"" + esc(f.getName()) + "\",\"addr\":\"" + hex + "\""
-                + ",\"size\":" + f.getBody().getNumAddresses()
-                + ",\"signature\":\"" + esc(f.getPrototypeString(false, false)) + "\""
-                + ",\"decompile_status\":\"" + (recovered ? "completed" : "failed") + "\""
-                + ",\"thunk\":" + f.isThunk()
-                + ",\"callingConvention\":\"" + esc(f.getCallingConventionName()) + "\""
-                + ",\"params\":[");
-            Parameter[] ps = f.getParameters();
-            for (int i = 0; i < ps.length; i++) {
-                fns.println("    {\"name\":\"" + esc(ps[i].getName()) + "\",\"type\":\""
-                    + esc(ps[i].getDataType().getDisplayName()) + "\""
-                    + ",\"ordinal\":" + i + "}"
-                    + (i + 1 < ps.length ? "," : ""));
-            }
-            fns.println("  ],\"returns\":\"" + esc(f.getReturnType().getDisplayName()) + "\"}");
+                    // ---- functions.json entry
+                    if (!firstFn) fns.println(",");
+                    firstFn = false;
+                    fns.println("  {\"name\":\"" + esc(f.getName()) + "\",\"addr\":\"" + hex + "\""
+                        + ",\"size\":" + f.getBody().getNumAddresses()
+                        + ",\"signature\":\"" + esc(f.getPrototypeString(false, false)) + "\""
+                        + ",\"decompile_status\":\"" + (recovered ? "completed" : "failed") + "\""
+                        + ",\"thunk\":" + f.isThunk()
+                        + ",\"callingConvention\":\"" + esc(f.getCallingConventionName()) + "\""
+                        + ",\"params\":[");
+                    Parameter[] ps = f.getParameters();
+                    for (int i = 0; i < ps.length; i++) {
+                        fns.println("    {\"name\":\"" + esc(ps[i].getName()) + "\",\"type\":\""
+                            + esc(ps[i].getDataType().getDisplayName()) + "\""
+                            + ",\"ordinal\":" + i + "}"
+                            + (i + 1 < ps.length ? "," : ""));
+                    }
+                    fns.println("  ],\"returns\":\"" + esc(f.getReturnType().getDisplayName()) + "\"}");
 
-            // ---- Ghidra-resolved call edges; unresolved indirect dispatch remains a gap.
-            for (Function callee : f.getCalledFunctions(monitor)) {
-                if (!firstEdge) calls.println(",");
-                firstEdge = false;
-                calls.println("  {\"caller\":\"" + esc(f.getName()) + "\",\"callerAddr\":\"" + hex
-                    + "\",\"callee\":\"" + esc(callee.getName()) + "\",\"calleeAddr\":\""
-                    + plainAddr(callee) + "\"}");
-            }
+                    // ---- Ghidra-resolved call edges; unresolved indirect dispatch remains a gap.
+                    for (Function callee : f.getCalledFunctions(monitor)) {
+                        if (!firstEdge) calls.println(",");
+                        firstEdge = false;
+                        calls.println("  {\"caller\":\"" + esc(f.getName()) + "\",\"callerAddr\":\"" + hex
+                            + "\",\"callee\":\"" + esc(callee.getName()) + "\",\"calleeAddr\":\""
+                            + plainAddr(callee) + "\"}");
+                    }
 
-            // ---- per-function evidence file: disasm header + decompiler body
-            File outFile = new File(dir, "fn_" + hex + "_" + fname + ".c");
-            try (PrintWriter w = newEvidenceWriter(outFile)) {
-                w.println("/* RAW Ghidra output - immutable evidence. program="
-                    + currentProgram.getName() + " func=" + f.getName()
-                    + " addr=" + hex + " size=" + f.getBody().getNumAddresses() + " */");
-                w.println("/* --- disassembly --- */");
-                InstructionIterator ins = currentProgram.getListing()
-                    .getInstructions(f.getBody(), true);
-                while (ins.hasNext() && !monitor.isCancelled()) {
-                    Instruction in = ins.next();
-                    w.println("/* " + in.getAddress() + " */  " + in.toString());
+                    // ---- per-function evidence file: disasm header + decompiler body
+                    File outFile = new File(dir, "fn_" + hex + "_" + fname + ".c");
+                    try (PrintWriter w = newEvidenceWriter(outFile)) {
+                        w.println("/* RAW Ghidra output - immutable evidence. program="
+                            + currentProgram.getName() + " func=" + f.getName()
+                            + " addr=" + hex + " size=" + f.getBody().getNumAddresses() + " */");
+                        w.println("/* --- disassembly --- */");
+                        InstructionIterator ins = currentProgram.getListing()
+                            .getInstructions(f.getBody(), true);
+                        while (ins.hasNext() && !monitor.isCancelled()) {
+                            Instruction in = ins.next();
+                            w.println("/* " + in.getAddress() + " */  " + in.toString());
+                        }
+                        w.println("/* --- decompiler --- */");
+                        if (recovered) {
+                            w.println(res.getDecompiledFunction().getC());
+                        } else {
+                            w.println("/* DECOMPILE FAILED: "
+                                + esc(res != null ? res.getErrorMessage() : "no result") + " */");
+                        }
+                        if (w.checkError()) throw new IOException("Failed writing " + outFile);
+                    }
+                    list.println(hex + "\t" + f.getName());
+                    dumped++;
                 }
-                w.println("/* --- decompiler --- */");
-                if (recovered) {
-                    w.println(res.getDecompiledFunction().getC());
-                } else {
-                    w.println("/* DECOMPILE FAILED: "
-                        + esc(res != null ? res.getErrorMessage() : "no result") + " */");
-                }
-                if (w.checkError()) throw new IOException("Failed writing " + outFile);
-            }
-            list.println(hex + "\t" + f.getName());
-            dumped++;
-        }
 
-        fns.println("]\n}");
-        calls.println("]\n}");
-        boolean writeFailed = fns.checkError() || calls.checkError() || list.checkError();
-        fns.close(); calls.close(); list.close();
-        if (writeFailed) throw new IOException("Failed writing evidence inventory");
-        try (PrintWriter status = newEvidenceWriter(new File(dir, "export-status.json"))) {
-            status.println("{\"program\":\"" + esc(currentProgram.getName())
-                + "\",\"complete\":" + (!monitor.isCancelled() && failed.isEmpty())
-                + ",\"requested\":" + jsonArray(targets.requested)
-                + ",\"matched\":" + jsonArray(targets.matched)
-                + ",\"unmatched\":" + jsonArray(targets.unmatched())
-                + ",\"failed\":" + jsonArray(failed) + ",\"dumped\":" + dumped + "}");
-            if (status.checkError()) throw new IOException("Failed writing export status");
-        }
-        println("DumpFunctions: " + dumped + " functions -> " + dir);
-        }
+                fns.println("]\n}");
+                calls.println("]\n}");
+                boolean writeFailed = fns.checkError() || calls.checkError() || list.checkError();
+                fns.close(); calls.close(); list.close();
+                if (writeFailed) throw new IOException("Failed writing evidence inventory");
+                try (PrintWriter status = newEvidenceWriter(new File(dir, "export-status.json"))) {
+                    status.println("{\"program\":\"" + esc(currentProgram.getName())
+                        + "\",\"complete\":" + (!monitor.isCancelled() && !analysisTimeoutOccurred() && failed.isEmpty())
+                        + ",\"analysis_timed_out\":" + analysisTimeoutOccurred()
+                        + ",\"requested\":" + jsonArray(targets.requested)
+                        + ",\"matched\":" + jsonArray(targets.matched)
+                        + ",\"unmatched\":" + jsonArray(targets.unmatched())
+                        + ",\"failed\":" + jsonArray(failed) + ",\"dumped\":" + dumped + "}");
+                    if (status.checkError()) throw new IOException("Failed writing export status");
+                }
+                println("DumpFunctions: " + dumped + " functions -> " + dir);
+            }
         } finally {
             decomp.dispose();
         }

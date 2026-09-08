@@ -44,12 +44,17 @@ count and selected scope. A dynamic symbol table does not establish the presence
 of internal symbols. DEBUG data is a source of names/types, not proof that every
 function has complete debug information. Ghidra output is a tool interpretation,
 not ground truth.
+Read `fn_count_status`, `fn_count_basis` and `fn_count_complete` alongside the
+legacy numeric count. A symbol census is not a total function inventory; language
+`unknown` means no supported identification was established, not that the input is C.
 
 Reject corrupt/non-ELF targets; request a final binary for standalone LTO IR.
 For archives, preserve member identity and duplicate member names; refuse a
 lossy expansion instead of silently overwriting members. This skill's generic
 reconstruction recipes target C/C++ ELF; other languages and architectures need
 explicitly supported analysis tools and ABI models.
+The bundled archive drivers currently reject duplicate member names. For those
+inputs obtain distinct members through an ordinal-aware extraction workflow first.
 
 For replacement work read [acceptance.md](references/acceptance.md) first.
 The deployment owner supplies the observation model, assumptions, target/runtime

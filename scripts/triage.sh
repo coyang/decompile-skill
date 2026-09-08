@@ -1,6 +1,6 @@
 #!/bin/bash
 # triage.sh — Phase 0 gate for the decompile skill.
-# Probes an ELF artifact (or an archive, member by member) with binutils only
+# Probes an ELF artifact (or an archive, member by member) with standard tooling
 # and emits triage.json: kind, language, fidelity tier, cost numbers.
 # Exit 1 = hard refusal (not ELF, LTO blob, unparseable). Exit 0 = proceed.
 #
@@ -56,7 +56,9 @@ PY
   exit 1
 }
 
-MAGIC=$(file -b "$ART" 2>/dev/null || echo unreadable)
+if ! MAGIC=$(file -b "$ART" 2>/dev/null); then
+  emit_refuse unreadable "file could not inspect the artifact"
+fi
 KIND=""
 if printf '%s' "$MAGIC" | grep -qi 'ar archive'; then
   KIND=archive
@@ -69,17 +71,21 @@ else
   emit_refuse not-elf "file magic is not ELF (.so/.a/.o/executable): $MAGIC"
 fi
 
-# probe_unit PATH LABEL KIND -> tab-separated: machine etype producer tier lang
-# vtable eh funcs exported   (sets globals on failure via return 1)
+# probe_unit PATH LABEL KIND -> tab-separated: machine etype producer tier lang,
+# vtable, eh, funcs, exports, count source/status/basis.
 probe_unit() {
   local U="$1" LABEL="$2" K="$3"
   local hdr machine etype producer secs tier lang mangled tv funcs exps
-  local fsrc fn_status fn_basis e f
+  local fsrc fn_status fn_basis fn_scope e f
   if ! hdr=$(readelf -h "$U" 2>/dev/null) || [[ -z "$hdr" ]]; then
     return 1
   fi
-  # Truncation: the ELF header can survive while sections lie past EOF.
-  if readelf -SW "$U" 2>&1 >/dev/null | grep -qiE 'past end of file|exceeds the size|corrupt'; then
+  # Truncation: the ELF header can survive while the section-table read fails.
+  # Capture both status and diagnostics; a failed read must not look stripped.
+  if ! secs=$(readelf -SW "$U" 2>&1) || [[ -z "$secs" ]]; then
+    return 1
+  fi
+  if printf '%s' "$secs" | grep -qiE 'past end of file|exceeds the size|corrupt'; then
     return 1
   fi
   machine=$(awk -F: '/Machine:/{gsub(/^ +/,"",$2); print $2}' <<<"$hdr")
@@ -87,7 +93,6 @@ probe_unit() {
   producer=$(readelf -p .comment "$U" 2>/dev/null \
     | sed -n 's/^ *\[[^]]*\] *//p' | grep -m1 -iE 'gcc|clang|llvm' || true)
   [[ -z "$producer" ]] && producer=unknown
-  secs=$(readelf -SW "$U" 2>/dev/null)
   if printf '%s' "$secs" | grep -q '\.gnu\.lto'; then
     printf 'LTO\n'; return 0
   fi
@@ -95,8 +100,8 @@ probe_unit() {
   elif printf '%s' "$secs" | grep -q '\.symtab';     then tier=SYMTAB
   elif printf '%s' "$secs" | grep -q '\.dynsym';     then tier=DYNSYM
   else tier=STRIPPED; fi
-  # DW_AT_producer carries the full flag set; .comment only the version.
-  # Flags matter upstream (V1 picks the compiler family, deep-mode rebuilds).
+  # DW_AT_producer may contain compiler options useful as reconstruction hints;
+  # it does not prove the complete original build configuration.
   if [[ "$tier" == DEBUG ]]; then
     producer=$(timeout 20 readelf --debug-dump=info "$U" 2>/dev/null \
       | sed -nE 's/.*DW_AT_producer *: //p' | head -1 \
@@ -122,20 +127,24 @@ probe_unit() {
     | awk '$2 ~ /[TtWw]/{print $NF}' | sort -u | wc -l)
   fsrc=nm
   fn_status=known
-  fn_basis='visible defined text symbols from nm (lower bound; not a complete function inventory)'
-  # STRIPPED .o: nm counts zero — that means "cannot count", not "no
-  # functions" (iter-1 F1). Estimate via entry-instruction or FDE census.
-  if (( funcs == 0 )) && [[ "$tier" == STRIPPED ]]; then
+  fn_scope=visible-symbol-count
+  fn_basis='visible defined text symbol count from nm; not an actual function count because aliases and undiscoverable functions may exist'
+  # Zero visible symbols means "cannot count", regardless of tier. Try a
+  # heuristic census, otherwise report the actual function count as unknown.
+  if (( funcs == 0 )); then
     e=$(objdump -d "$U" 2>/dev/null | grep -c endbr64 || true)
     if (( e > 0 )); then
       funcs=$e; fsrc=endbr64; fn_status=estimated
+      fn_scope=estimated-function-count
       fn_basis='endbr64 instruction census (heuristic estimate)'
     else f=$(timeout 20 readelf --debug-dump=frames "$U" 2>/dev/null | grep -c 'FDE cie' || true)
          if (( f > 0 )); then
            funcs=$f; fsrc=fde; fn_status=estimated
+           fn_scope=estimated-function-count
            fn_basis='frame description entry census (heuristic estimate)'
          else
            fsrc=unknown; fn_status=unknown
+           fn_scope=function-count
            fn_basis='no visible text symbols or supported function census'
          fi
     fi
@@ -146,11 +155,11 @@ probe_unit() {
   else
     exps=$(nm -D --defined-only "$U" 2>/dev/null | awk '$2 ~ /[TtDdBbRrWw]/{print $NF}' | sort -u | wc -l)
   fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$machine" "$etype" "$producer" "$tier" "$lang" \
     "$([[ "$tv" -gt 0 ]] && echo true || echo false)" \
     "$([[ "$(printf '%s' "$secs" | grep -c '\.gcc_except_table')" -gt 0 ]] && echo true || echo false)" \
-    "$funcs" "$exps" "$fsrc" "$fn_status" "$fn_basis"
+    "$funcs" "$exps" "$fsrc" "$fn_status" "$fn_basis" "$fn_scope"
 }
 
 member_json() {
@@ -158,7 +167,8 @@ member_json() {
   local IFS=$'\t'; local -a f; read -ra f <<< "$row"
   python3 - "$LABEL" "${f[0]}" "${f[1]}" "${f[2]}" "${f[3]}" "${f[4]}" \
     "${f[5]}" "${f[6]}" "${f[7]:-0}" "${f[9]:-unknown}" "${f[8]:-0}" \
-    "${f[10]:-unknown}" "${f[11]:-count basis unavailable}" <<'PY'
+    "${f[10]:-unknown}" "${f[11]:-count basis unavailable}" \
+    "${f[12]:-function-count}" <<'PY'
 import json
 import sys
 
@@ -176,6 +186,7 @@ value = {
     "exported": int(sys.argv[11]),
     "fn_count_status": sys.argv[12],
     "fn_count_basis": sys.argv[13],
+    "fn_count_scope": sys.argv[14],
     "fn_count_complete": False,
 }
 json.dump(value, sys.stdout, ensure_ascii=True, separators=(",", ":"))
@@ -190,7 +201,8 @@ import sys
 json.dump(
     {"name": sys.argv[1], "kind": sys.argv[2], "funcs": 0, "exported": 0,
      "fn_count_status": "unknown", "fn_count_complete": False,
-     "fn_count_basis": "unit was not analyzed as ELF code"},
+     "fn_count_basis": "unit was not analyzed as ELF code",
+     "fn_count_scope": "function-count"},
     sys.stdout,
     ensure_ascii=True,
     separators=(",", ":"),
@@ -218,6 +230,7 @@ walk() { # PATH LABEL KIND
   fi
   [[ "$row" == LTO ]] && {
     if [[ "$3" == archive ]]; then
+      ANY_UNKNOWN=true
       local item
       if ! item=$(simple_member_json "$2" lto); then
         echo "triage: failed to serialize LTO member: $2" >&2
@@ -246,13 +259,18 @@ walk() { # PATH LABEL KIND
 }
 
 if [[ "$KIND" == archive ]]; then
-  TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT
-  cp "$ART" "$TMPD/a.ar" 2>/dev/null || emit_refuse corrupt "archive unreadable"
+  if ! TMPD=$(mktemp -d); then
+    emit_refuse unavailable "cannot create temporary archive extraction directory"
+  fi
+  trap 'rm -rf "$TMPD"' EXIT
+  archive_copy="$TMPD/archive-input.a"
+  cp "$ART" "$archive_copy" 2>/dev/null || emit_refuse corrupt "archive unreadable"
   archive_listing=""
   if ! archive_listing=$(ar t "$ART" 2>/dev/null); then
     emit_refuse corrupt "cannot read archive member table"
   fi
   mapfile -t ARCHIVE_MEMBER_NAMES <<< "$archive_listing"
+  [[ -z "$archive_listing" ]] && ANY_UNKNOWN=true
   declare -A seen_members=()
   for m in "${ARCHIVE_MEMBER_NAMES[@]}"; do
     [[ -z "$m" ]] && continue
@@ -261,13 +279,15 @@ if [[ "$KIND" == archive ]]; then
     fi
     seen_members["$m"]=1
   done
+  member_index=0
   for m in "${ARCHIVE_MEMBER_NAMES[@]}"; do
     [[ -z "$m" ]] && continue
-    if ! ( cd "$TMPD" && ar x a.ar "$m" 2>/dev/null ); then
+    member_index=$((member_index + 1))
+    unit_path="$TMPD/member-$member_index.bin"
+    if ! ar p "$archive_copy" "$m" > "$unit_path" 2>/dev/null; then
       emit_refuse corrupt "failed to extract archive member: $m"
     fi
-    [[ -f "$TMPD/$m" ]] || emit_refuse corrupt "archive member was not extracted: $m"
-    if ! member_magic=$(file -b "$TMPD/$m" 2>/dev/null); then
+    if ! member_magic=$(file -b "$unit_path" 2>/dev/null); then
       emit_refuse corrupt "cannot identify archive member: $m"
     fi
     if ! printf '%s' "$member_magic" | grep -q 'ELF '; then
@@ -276,9 +296,10 @@ if [[ "$KIND" == archive ]]; then
         exit 1
       fi
       MJ+=("$item")
+      ANY_UNKNOWN=true
       continue
     fi
-    walk "$TMPD/$m" "$m" archive
+    walk "$unit_path" "$m" archive
   done
   (( CORRUPT )) && emit_refuse corrupt "one or more archive members are not parseable ELF (see members[])"
 else
@@ -289,8 +310,11 @@ fi
 # --- aggregate ------------------------------------------------------------------
 # `tier` is the WORST over units (safe ceiling), but on archives it lies by
 # omission: a 25/26-DEBUG archive reports STRIPPED. tier_hist gives the truth.
-worst=DEBUG HIST_D=0 HIST_S=0 HIST_Y=0 HIST_P=0
-for t in "${TIERS[@]:-STRIPPED}"; do
+worst=UNKNOWN HIST_D=0 HIST_S=0 HIST_Y=0 HIST_P=0
+if [[ ${#TIERS[@]} -gt 0 ]]; then
+  worst=DEBUG
+fi
+for t in "${TIERS[@]}"; do
   case "$t" in
     DEBUG) : ; HIST_D=$((HIST_D+1)) ;;
     SYMTAB) [[ "$worst" == DEBUG ]] && worst=SYMTAB ; HIST_S=$((HIST_S+1)) ;;
@@ -307,33 +331,39 @@ if [[ ${#LANGS[@]} -gt 0 ]]; then
 fi
 PIE=false
 [[ "$KIND" == exe && "$ETYPE" == DYN* ]] && PIE=true
-SZ=$(stat -c%s "$ART" 2>/dev/null || echo 0)
+if ! SZ=$(stat -c%s "$ART" 2>/dev/null); then
+  emit_refuse unreadable "cannot determine artifact size"
+fi
 COST=false
 (( SZ > 52428800 || TOTAL_FUNCS > 2000 )) && COST=true
 
 FN_STATUS=known
 FN_SOURCE=nm
-FN_BASIS='sum of per-unit visible defined text symbols (lower bound; nm is not a complete function inventory)'
+FN_SCOPE=visible-symbol-count
+FN_BASIS='sum of per-unit visible defined text symbol counts; not an actual function count because aliases and undiscoverable functions may exist'
 if $ANY_UNKNOWN; then
   FN_STATUS=unknown
   FN_SOURCE=unknown
+  FN_SCOPE=function-count
   FN_BASIS='sum includes one or more units with no supported function census'
 elif $ANY_EST; then
   FN_STATUS=estimated
   FN_SOURCE=estimated
+  FN_SCOPE=estimated-function-count
   FN_BASIS='sum includes one or more heuristic per-unit function estimates'
 fi
 
-MEMBERS_JSON="$(IFS=,; echo "${MJ[*]:-}")"
+MEMBERS_JSON=$(IFS=,; printf '%s' "${MJ[*]:-}")
 tmp_json="${JSON}.tmp.$$"
 if ! python3 - "$KIND" "${MACHINE:-unknown}" "$PIE" "$PRODUCER" "$lang" \
   "$ANY_VT" "$ANY_EH" "$worst" "$TIER_HIST" "$TOTAL_FUNCS" "$FN_SOURCE" \
-  "$SZ" "$EXPS_TOP" "$COST" "$MAGIC" "$FN_STATUS" "$FN_BASIS" "$MEMBERS_JSON" \
+  "$SZ" "$EXPS_TOP" "$COST" "$MAGIC" "$FN_STATUS" "$FN_BASIS" "$FN_SCOPE" \
+  "$MEMBERS_JSON" \
   > "$tmp_json" <<'PY'
 import json
 import sys
 
-members = json.loads("[" + sys.argv[18] + "]")
+members = json.loads("[" + sys.argv[19] + "]")
 value = {
     "kind": sys.argv[1], "machine": sys.argv[2], "pie": sys.argv[3] == "true",
     "producer": sys.argv[4], "lang": sys.argv[5],
@@ -343,7 +373,7 @@ value = {
     "exported_count": int(sys.argv[13]), "cost_warning": sys.argv[14] == "true",
     "refuse_reason": None, "magic": sys.argv[15], "members": members,
     "fn_count_status": sys.argv[16], "fn_count_basis": sys.argv[17],
-    "fn_count_complete": False,
+    "fn_count_scope": sys.argv[18], "fn_count_complete": False,
 }
 json.dump(value, sys.stdout, ensure_ascii=True, separators=(",", ":"))
 sys.stdout.write("\n")

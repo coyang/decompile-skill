@@ -12,6 +12,11 @@ Ghidra's driver supports `--targets FILE`, `--program NAME`, `--processor ID`,
 completed analysis; never treat the mere presence of a project file as proof that
 an interrupted import completed. Recreate analysis in a new workspace if its
 artifact/settings/completion state cannot be verified.
+The driver now requires a completed analysis manifest with matching artifact,
+Ghidra version/launcher, export scripts, processor and analysis settings, plus
+unchanged project file hashes. An old project without this manifest is not reused.
+Every invocation creates a separate evidence run; point subsequent reconstruction
+at that run's manifest rather than an assumed flat `ghidra/` export directory.
 
 For archives, check `ar t` for duplicate basenames before extraction. Preserve
 member ordinals; do not allow `ar x` overwrites to erase translation units. LTO
